@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: napt-single-player
+    runtime: node
+    plan: free
+    buildCommand: echo "No build step required"
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
