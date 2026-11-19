@@ -64,7 +64,10 @@ function analyzeWikidata(items) {
     const isPerson = types.includes('Q5') || /^(?:[\w -]+ )?(?:person|politician|actor|musician|artist|footballer|writer|athlete)\b/i.test(description);
     const isName = nameDescription.test(description) || types.some(id=>['Q202444','Q12308941','Q11879590','Q101352'].includes(id));
     const isPlace = (placeDescription.test(description) && !/^country (?:music|singer|artist|song|album|genre)\b/i.test(description)) || (claims(x.entity,'P625').length > 0 && !isPerson && !isName);
-    const isAnimal = animalDescription.test(description) && !botanicalWords.test(description) && !isPlace && !isPerson;
+    // Wikidata Q25894 is the established common-name concept 'antelope',
+    // not a taxonomic species. Its description does not match species-of-animal rules.
+    const isDocumentedAnimalConcept = x.id === 'Q25894' && x.label.toLocaleLowerCase('en') === 'antelope';
+    const isAnimal = (isDocumentedAnimalConcept || animalDescription.test(description)) && !botanicalWords.test(description) && !isPlace && !isPerson;
     const isBotanical = /^(?:species|subspecies|genus|family|order|type) of (?:[\w -]*\b(?:plant|tree|flower|fungus|fruit|vegetable|alga|grass)\b)|^(?:plant|tree|flower|fungus|fruit|vegetable|alga|grass)\b/i.test(description);
     const isThing = objectDescription.test(description) && !isPlace && !isPerson && !isAnimal;
     return {...x, isName, isPerson, isPlace, isAnimal, isBotanical, isThing,
