@@ -2,7 +2,16 @@
 
 // Public-source category checks. Uncertainty MUST return review, not a fabricated verdict.
 const CATEGORIES = new Set(['Name', 'Animal', 'Place', 'Thing']);
-const USER_AGENT = 'NAPT-SinglePlayer/2.2 (educational word game)';
+// Wikimedia requests must identify the application and provide a contact URL.
+const USER_AGENT = 'NAPT-SinglePlayer/2.6 (https://github.com/banjidavid/NAPT; educational word game)';
+const REQUEST_TIMEOUT_MS = 8000;
+const RETRYABLE_HTTP = new Set([429, 500, 502, 503, 504]);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function logSourceFailure(source, err) {
+  // Log only provider, status and error code. Never log player answers.
+  console.warn(`[NAPT verify] ${source} failed: ${err?.status || err?.code || err?.name || 'unknown'} ${String(err?.message || '').slice(0, 110)}`);
+}
+
 const cache = new Map();
 const TTL = 24 * 60 * 60 * 1000;
 const cacheLimit = 1000;
@@ -20,9 +29,35 @@ function cachePut(key, value) {
   cache.set(key, {until: Date.now() + TTL, value});
 }
 async function getJSON(url, fetcher = fetch) {
-  const response = await fetcher(url, {headers: {'Accept': 'application/json', 'User-Agent': USER_AGENT}, signal: AbortSignal.timeout(5500)});
-  if (!response.ok) { const error = Error(`Source returned ${response.status}`); error.status = response.status; throw error; }
-  return response.json();
+  const source = new URL(url).hostname;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetcher(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': USER_AGENT,
+          // Extra identification supported by Wikimedia's API policy.
+          ...(source.endsWith('wikidata.org') ? {'Api-User-Agent': USER_AGENT} : {})
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+      if (response.ok) return await response.json();
+      const error = Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      if (!RETRYABLE_HTTP.has(response.status) || attempt === 2) throw error;
+      const retryAfter = Number(response.headers?.get?.('retry-after'));
+      const delay = Number.isFinite(retryAfter) && retryAfter >= 0
+        ? Math.min(retryAfter * 1000, 3000)
+        : 350 * (attempt + 1);
+      await sleep(delay);
+    } catch (error) {
+      // Don't repeatedly retry 400/401/403, invalid JSON, or other terminal errors.
+      if (error.status && !RETRYABLE_HTTP.has(error.status)) throw error;
+      if (attempt === 2) throw error;
+      if (!error.status) await sleep(350 * (attempt + 1));
+      // Retryable HTTP responses have already waited above.
+    }
+  }
 }
 function claims(entity, property) {
   return (entity?.claims?.[property] || []).map(v => v?.mainsnak?.datavalue?.value?.id).filter(Boolean);
@@ -125,7 +160,12 @@ async function validate(input, fetcher = fetch) {
   const dictUrl = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(answer)}`;
   try {
     const [wd,dict] = await Promise.allSettled([wikidata(answer,fetcher),category==='Name' ? Promise.resolve([]) : dictionary(answer,fetcher)]);
-    if(wd.status === 'rejected' && dict.status === 'rejected') return item('review','Online verification sources are unavailable. Please retry.');
+    if (wd.status === 'rejected') logSourceFailure('wikidata.org', wd.reason);
+    if (dict.status === 'rejected') logSourceFailure('dictionaryapi.dev', dict.reason);
+    // Name validation relies on Wikidata alone: dictionary's empty fulfilled promise
+    // must NOT be mistaken for a working second verification provider.
+    if (wd.status === 'rejected' && (category === 'Name' || dict.status === 'rejected'))
+      return item('review','Online verification source unavailable. Please retry later.');
     const found = analyzeWikidata(wd.status === 'fulfilled'?wd.value:[]);
     const definitions = dict.status === 'fulfilled' ? hasNoun(dict.value) : [];
     const result = resultFor(category,answer,found,definitions,dictUrl);
@@ -133,7 +173,8 @@ async function validate(input, fetcher = fetch) {
     if(wd.status === 'rejected' && result.status === 'invalid') return item('review','A category source was unavailable; answer needs review.');
     if(result.status !== 'review' || (wd.status === 'fulfilled' && dict.status === 'fulfilled')) cachePut(cacheKey,result);
     return result;
-  } catch {
+  } catch (error) {
+    logSourceFailure('verification', error);
     return item('review','Verification could not complete. Retry later.');
   }
 }
